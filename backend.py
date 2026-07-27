@@ -5,6 +5,7 @@ import zipfile
 import PyPDF2
 import fitz  # PyMuPDF
 import uuid
+import json
 from google.genai import types
 from fastapi import Response, Form
 from pydantic import BaseModel
@@ -31,6 +32,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ==========================================
+# SYSTEM PROMPT FOR AI APP CONTROL
+# ==========================================
+APP_CONTROL_PROMPT = """You are an AI assistant built directly into a mobile app called 'PDF Toolkit'. You have the ability to navigate the app and control settings for the user.
+
+You MUST ALWAYS respond with a valid JSON object. Do not wrap it in markdown block quotes (no ```json).
+
+If the user asks a normal question or needs a PDF summary, respond with JSON like this:
+{"reply": "Your normal conversational response here."}
+
+HOWEVER, if the user asks you to navigate the app, change a setting, or open a tool, you must also include the 'action' and 'target' fields in the JSON. 
+
+Exact commands you can use:
+- To go to the Profile screen: {"reply": "Opening your profile now.", "action": "NAVIGATE", "target": "3"}
+- To go to the Search screen: {"reply": "Opening the search tab.", "action": "NAVIGATE", "target": "1"}
+- To go to the Home/Dashboard screen: {"reply": "Going to the dashboard.", "action": "NAVIGATE", "target": "0"}
+- To turn on/off Dark Mode: {"reply": "Toggling dark mode for you.", "action": "TOGGLE_DARK_MODE"}
+- To clear the chat history: {"reply": "Wiping chat history.", "action": "CLEAR_CHAT"}
+- To open a specific tool (e.g., 'Merge PDFs', 'PDF to JPG', 'Add Watermark'): {"reply": "Opening tool.", "action": "OPEN_TOOL", "target": "Exact Tool Name"}
+"""
 
 @app.get("/")
 def read_root():
@@ -184,7 +206,7 @@ async def jpg_to_pdf(files: List[UploadFile] = File(...)):
         print(f"⚠️ Error: {e}")
         return {"status": "error", "message": str(e)}
     
-    # ==========================================
+# ==========================================
 # ENDPOINT: REMOVE PASSWORD FROM PDF
 # ==========================================
 @app.post("/api/unlock")
@@ -230,24 +252,40 @@ async def unlock_pdf(file: UploadFile = File(...), password: str = Form(...)):
 class ChatRequest(BaseModel):
     message: str
 
+# ==========================================
+# ENDPOINT: AI CHAT (APP CONTROL INTEGRATED)
+# ==========================================
 @app.post("/api/chat")
 async def chat_with_ai(request: ChatRequest):
     try:
-        # Explicitly fetch the key from Render's environment
         my_api_key = os.environ.get("GEMINI_API_KEY")
-        
-        # Force the client to use the API key instead of OAuth
         client = genai.Client(api_key=my_api_key)
         
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=request.message,
+            config=types.GenerateContentConfig(
+                system_instruction=APP_CONTROL_PROMPT,
+                response_mime_type="application/json",
+            )
         )
-        return {"status": "success", "reply": response.text}
+        
+        # Parse the JSON response from Gemini
+        ai_data = json.loads(response.text)
+        
+        # Return the parsed data back to Flutter
+        return {
+            "status": "success", 
+            "reply": ai_data.get("reply", "I am not sure how to respond to that."),
+            "action": ai_data.get("action"),
+            "target": ai_data.get("target")
+        }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# Add this new endpoint for file uploads
+# ==========================================
+# ENDPOINT: AI CHAT (FILE ATTACHED)
+# ==========================================
 @app.post("/api/chat/file")
 async def chat_with_file(file: UploadFile = File(...), message: str = Form("Please summarize this document in detail.")):
     try:
@@ -264,12 +302,24 @@ async def chat_with_file(file: UploadFile = File(...), message: str = Form("Plea
         # 2. Combine the user's prompt with the document text
         full_prompt = f"{message}\n\n--- Document Content ---\n{extracted_text}"
         
-        # 3. Send to Gemini
+        # 3. Send to Gemini forcing JSON response
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=full_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=APP_CONTROL_PROMPT,
+                response_mime_type="application/json",
+            )
         )
-        return {"status": "success", "reply": response.text}
+        
+        ai_data = json.loads(response.text)
+        
+        return {
+            "status": "success", 
+            "reply": ai_data.get("reply", "I have processed the document."),
+            "action": ai_data.get("action"),
+            "target": ai_data.get("target")
+        }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -360,5 +410,4 @@ async def image_to_text(file: UploadFile = File(...)):
         )
         return {"status": "success", "result": response.text}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
         return {"status": "error", "message": str(e)}
