@@ -6,6 +6,7 @@ import PyPDF2
 import fitz  # PyMuPDF
 import uuid
 import json
+from typing import List, Dict, Any
 from google.genai import types
 from fastapi import Response, Form
 from pydantic import BaseModel
@@ -283,29 +284,94 @@ async def chat_with_ai(request: ChatRequest):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+from typing import List, Dict, Any
+import json
+
+class ChatRequest(BaseModel):
+    message: str
+    history: List[Dict[str, str]] = [] # Accepts the chat history
+
 # ==========================================
-# ENDPOINT: AI CHAT (FILE ATTACHED)
+# ENDPOINT: AI CHAT (APP CONTROL & MEMORY INTEGRATED)
 # ==========================================
-@app.post("/api/chat/file")
-async def chat_with_file(file: UploadFile = File(...), message: str = Form("Please summarize this document in detail.")):
+@app.post("/api/chat")
+async def chat_with_ai(request: ChatRequest):
     try:
         my_api_key = os.environ.get("GEMINI_API_KEY")
         client = genai.Client(api_key=my_api_key)
         
-        # 1. Extract text from the uploaded PDF
+        # 1. Build the conversation history for Gemini
+        contents = []
+        for msg in request.history:
+            role = "user" if msg.get("sender") == "user" else "model"
+            contents.append(
+                types.Content(role=role, parts=[types.Part.from_text(text=msg.get("text", ""))])
+            )
+            
+        # 2. Add the current message
+        contents.append(
+            types.Content(role="user", parts=[types.Part.from_text(text=request.message)])
+        )
+        
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=APP_CONTROL_PROMPT,
+                response_mime_type="application/json",
+            )
+        )
+        
+        ai_data = json.loads(response.text)
+        
+        return {
+            "status": "success", 
+            "reply": ai_data.get("reply", "I am not sure how to respond to that."),
+            "action": ai_data.get("action"),
+            "target": ai_data.get("target")
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# ==========================================
+# ENDPOINT: AI CHAT (FILE ATTACHED WITH MEMORY)
+# ==========================================
+@app.post("/api/chat/file")
+async def chat_with_file(
+    file: UploadFile = File(...), 
+    message: str = Form("Please summarize this document in detail."),
+    history: str = Form("[]") # Receives history as a JSON string
+):
+    try:
+        my_api_key = os.environ.get("GEMINI_API_KEY")
+        client = genai.Client(api_key=my_api_key)
+        
+        # Extract text from the uploaded PDF
         pdf_bytes = await file.read()
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         extracted_text = ""
         for page in doc:
             extracted_text += page.get_text()
             
-        # 2. Combine the user's prompt with the document text
+        # Build the conversation history for Gemini
+        contents = []
+        parsed_history = json.loads(history)
+        for msg in parsed_history:
+            role = "user" if msg.get("sender") == "user" else "model"
+            contents.append(
+                types.Content(role=role, parts=[types.Part.from_text(text=msg.get("text", ""))])
+            )
+            
+        # Combine the user's prompt with the document text
         full_prompt = f"{message}\n\n--- Document Content ---\n{extracted_text}"
+        contents.append(
+            types.Content(role="user", parts=[types.Part.from_text(text=full_prompt)])
+        )
         
-        # 3. Send to Gemini forcing JSON response
+        # Send to Gemini
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=full_prompt,
+            contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=APP_CONTROL_PROMPT,
                 response_mime_type="application/json",
