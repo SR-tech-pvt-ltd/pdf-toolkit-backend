@@ -479,3 +479,35 @@ async def image_to_text(file: UploadFile = File(...)):
         return {"status": "success", "result": response.text}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+# ==========================================
+# NEW ENDPOINT: COMPRESS PDF
+# ==========================================
+@app.post("/api/compress")
+async def compress_pdf(file: UploadFile = File(...)):
+    """Receives a PDF, compresses its streams and removes unused data, and returns it."""
+    try:
+        print(f"🗜️ Compressing file: {file.filename}")
+        
+        pdf_bytes = await file.read()
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
+        memory_file = io.BytesIO()
+        
+        # PyMuPDF Compression Magic:
+        # garbage=4: removes unused objects, duplicate objects, and compacts xref table
+        # deflate=True: compresses uncompressed streams
+        # deflate_images=True: tries to compress image streams further
+        doc.save(memory_file, garbage=4, deflate=True, deflate_images=True)
+        memory_file.seek(0)
+        
+        print("✅ Compression successful! Sending back to app...")
+        return StreamingResponse(
+            memory_file, 
+            media_type='application/pdf',
+            headers={'Content-Disposition': f'attachment; filename="compressed_{file.filename}"'}
+        )
+        
+    except Exception as e:
+        print(f"⚠️ Error: {e}")
+        return {"status": "error", "message": str(e)}
