@@ -511,3 +511,127 @@ async def compress_pdf(file: UploadFile = File(...)):
     except Exception as e:
         print(f"⚠️ Error: {e}")
         return {"status": "error", "message": str(e)}
+
+# ==========================================
+# NEW ENDPOINT: ROTATE PDF
+# ==========================================
+@app.post("/api/rotate")
+async def rotate_pdf(file: UploadFile = File(...), input_data: str = Form("90")):
+    try:
+        degrees = int(input_data.strip())
+        reader = PyPDF2.PdfReader(file.file)
+        writer = PyPDF2.PdfWriter()
+        
+        for page in reader.pages:
+            page.rotate(degrees)
+            writer.add_page(page)
+            
+        memory_file = io.BytesIO()
+        writer.write(memory_file)
+        memory_file.seek(0)
+        
+        return StreamingResponse(
+            memory_file, 
+            media_type='application/pdf',
+            headers={'Content-Disposition': f'attachment; filename="rotated_{file.filename}"'}
+        )
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# ==========================================
+# NEW ENDPOINT: SPLIT PDF
+# ==========================================
+@app.post("/api/split")
+async def split_pdf(file: UploadFile = File(...), input_data: str = Form("1-1")):
+    try:
+        # Parse input like "1-5"
+        parts = input_data.split('-')
+        start_page = max(1, int(parts[0].strip()))
+        end_page = int(parts[1].strip()) if len(parts) > 1 else start_page
+        
+        reader = PyPDF2.PdfReader(file.file)
+        writer = PyPDF2.PdfWriter()
+        
+        start_idx = start_page - 1
+        end_idx = min(len(reader.pages), end_page)
+        
+        for i in range(start_idx, end_idx):
+            writer.add_page(reader.pages[i])
+            
+        memory_file = io.BytesIO()
+        writer.write(memory_file)
+        memory_file.seek(0)
+        
+        return StreamingResponse(
+            memory_file, 
+            media_type='application/pdf',
+            headers={'Content-Disposition': f'attachment; filename="split_{file.filename}"'}
+        )
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# ==========================================
+# NEW ENDPOINT: EXTRACT IMAGES FROM PDF
+# ==========================================
+@app.post("/api/extractimages")
+async def extract_images(file: UploadFile = File(...)):
+    try:
+        pdf_bytes = await file.read()
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
+        memory_zip = io.BytesIO()
+        image_count = 0
+        
+        with zipfile.ZipFile(memory_zip, "w") as zf:
+            for page_num in range(len(doc)):
+                page = doc.load_page(page_num)
+                image_list = page.get_images(full=True)
+                
+                for img_index, img in enumerate(image_list):
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    ext = base_image["ext"]
+                    image_count += 1
+                    zf.writestr(f"image_p{page_num+1}_{image_count}.{ext}", image_bytes)
+        
+        if image_count == 0:
+            return {"status": "error", "message": "No images found in this PDF."}
+            
+        memory_zip.seek(0)
+        return StreamingResponse(
+            memory_zip, 
+            media_type='application/zip',
+            headers={'Content-Disposition': f'attachment; filename="extracted_images_{file.filename}.zip"'}
+        )
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# ==========================================
+# NEW ENDPOINT: AI PDF TRANSLATOR
+# ==========================================
+@app.post("/api/translate")
+async def translate_pdf(file: UploadFile = File(...), input_data: str = Form("Hindi")):
+    try:
+        my_api_key = os.environ.get("GEMINI_API_KEY")
+        client = genai.Client(api_key=my_api_key)
+        
+        pdf_bytes = await file.read()
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        extracted_text = ""
+        for page in doc:
+            extracted_text += page.get_text()
+            
+        if not extracted_text.strip():
+             return {"status": "error", "message": "No text found to translate."}
+
+        prompt = f"Translate the following document into {input_data}. Maintain the original tone and structure as much as possible:\n\n{extracted_text}"
+        
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+        
+        return {"status": "success", "result": response.text}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
