@@ -4,3 +4,7 @@ python-multipart
 PyPDF2
 pymupdf
 google-genai
+pdf2docx
+pdfplumber
+pandas
+openpyxl
