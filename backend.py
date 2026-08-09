@@ -63,6 +63,7 @@ Exact commands you can use:
 """
 
 @app.get("/")
+@app.head("/")
 def read_root():
     return {"message": "PDF Toolkit Backend is running!"}
 
