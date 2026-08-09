@@ -8,3 +8,4 @@ pdf2docx
 pdfplumber
 pandas
 openpyxl
+python-pptx
