@@ -1,22 +1,21 @@
-# Use official Python image
-FROM python:3.10-slim
+# 1. Use an official, lightweight Python environment
+FROM python:3.11-slim
 
-# Install LibreOffice (Docker gives us the root access needed for this)
-RUN apt-get update && apt-get install -y libreoffice --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
+# 2. Install LibreOffice required for Word/Excel/PPT to PDF conversions
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libreoffice && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# Set the working directory in the container
+# 3. Set the working directory inside the server
 WORKDIR /app
 
-# Copy the requirements file and install Python dependencies
+# 4. Copy your requirements file and install Python packages
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all your backend files into the container
+# 5. Copy your backend.py file into the server
 COPY . .
 
-# Expose the port that Render expects
-EXPOSE 10000
-
-# Start the Uvicorn server using Render's dynamic port
-CMD uvicorn backend:app --host 0.0.0.0 --port ${PORT:-10000}
+# 6. Boot up the Uvicorn server on Render's required port
+CMD ["sh", "-c", "uvicorn backend:app --host 0.0.0.0 --port ${PORT:-10000}"]
