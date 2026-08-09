@@ -5,6 +5,8 @@ import zipfile
 import PyPDF2
 import pymupdf as fitz  # PyMuPDF
 import uuid
+import subprocess
+from pptx import Presentation
 import json
 from typing import List, Dict, Any
 from google.genai import types
@@ -674,3 +676,90 @@ async def pdf_to_excel(background_tasks: BackgroundTasks, file: UploadFile = Fil
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run(app, host='0.0.0.0', port=5000)
+
+# ==========================================
+# NEW ENDPOINT: PDF TO POWERPOINT (PPTX)
+# ==========================================
+@app.post("/api/pdftoppt")
+async def pdf_to_ppt(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    """Converts a PDF into a PowerPoint by turning each page into an image slide."""
+    try:
+        pdf_path = f"temp_{uuid.uuid4().hex}_{file.filename}"
+        pptx_path = pdf_path.replace('.pdf', '.pptx')
+        
+        with open(pdf_path, "wb") as buffer:
+            buffer.write(await file.read())
+            
+        doc = fitz.open(pdf_path)
+        prs = Presentation()
+        blank_slide_layout = prs.slide_layouts[6] # 6 is the layout for a blank slide
+        
+        for page_num in range(len(doc)):
+            page = doc.load_page(page_num)
+            pix = page.get_pixmap(dpi=150)
+            img_path = f"temp_img_{uuid.uuid4().hex}.png"
+            pix.save(img_path)
+            
+            slide = prs.slides.add_slide(blank_slide_layout)
+            # Add image to fill the entire slide
+            slide.shapes.add_picture(img_path, 0, 0, width=prs.slide_width, height=prs.slide_height)
+            os.remove(img_path)
+            
+        prs.save(pptx_path)
+        
+        def cleanup():
+            if os.path.exists(pdf_path): os.remove(pdf_path)
+            if os.path.exists(pptx_path): os.remove(pptx_path)
+            
+        background_tasks.add_task(cleanup)
+        
+        return FileResponse(
+            path=pptx_path, 
+            filename=f"converted_{file.filename.replace('.pdf', '.pptx')}",
+            media_type='application/vnd.openxmlformats-officedocument.presentationml.presentation'
+        )
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# ==========================================
+# NEW ENDPOINTS: OFFICE (Word/Excel/PPT) TO PDF
+# ==========================================
+async def convert_office_to_pdf_logic(background_tasks, file, extension):
+    """Core logic using LibreOffice headless to convert any office format to PDF."""
+    try:
+        input_path = f"temp_{uuid.uuid4().hex}_{file.filename}"
+        output_dir = os.path.dirname(os.path.abspath(input_path)) or "."
+        
+        with open(input_path, "wb") as buffer:
+            buffer.write(await file.read())
+            
+        # Execute LibreOffice headless conversion
+        subprocess.run(["libreoffice", "--headless", "--convert-to", "pdf", input_path, "--outdir", output_dir], check=True)
+        
+        pdf_path = input_path.rsplit('.', 1)[0] + ".pdf"
+        
+        def cleanup():
+            if os.path.exists(input_path): os.remove(input_path)
+            if os.path.exists(pdf_path): os.remove(pdf_path)
+            
+        background_tasks.add_task(cleanup)
+        
+        return FileResponse(
+            path=pdf_path, 
+            filename=f"converted_{file.filename.rsplit('.', 1)[0]}.pdf",
+            media_type='application/pdf'
+        )
+    except Exception as e:
+        return {"status": "error", "message": f"Server requires LibreOffice. Error: {str(e)}"}
+
+@app.post("/api/wordtopdf")
+async def word_to_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    return await convert_office_to_pdf_logic(background_tasks, file, "word")
+
+@app.post("/api/exceltopdf")
+async def excel_to_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    return await convert_office_to_pdf_logic(background_tasks, file, "excel")
+
+@app.post("/api/ppttopdf")
+async def ppt_to_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    return await convert_office_to_pdf_logic(background_tasks, file, "ppt")
