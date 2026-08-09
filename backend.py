@@ -8,13 +8,16 @@ import uuid
 import json
 from typing import List, Dict, Any
 from google.genai import types
-from fastapi import Response, Form
-from pydantic import BaseModel
-from typing import List
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from pydantic import BaseModel
 from google import genai
+
+# --- NEW IMPORTS FOR WORD & EXCEL ---
+from pdf2docx import Converter
+import pdfplumber
+import pandas as pd
 
 # --- Configuration ---
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6IZOita0-V6iAgoHDIVqgLYrfOXdprS1EkMxtml5po2VA")
@@ -227,7 +230,6 @@ async def unlock_pdf(file: UploadFile = File(...), password: str = Form(...)):
         # 2. Attempt to decrypt with the provided password
         success = reader.decrypt(password)
         
-        # In PyPDF2, decrypt returns 0 if it fails (wrong password)
         if success == 0:
             return {"status": "error", "message": "Incorrect password. Please try again."}
             
@@ -251,43 +253,6 @@ async def unlock_pdf(file: UploadFile = File(...), password: str = Form(...)):
     except Exception as e:
         print(f"⚠️ Error: {e}")
         return {"status": "error", "message": str(e)}
-
-class ChatRequest(BaseModel):
-    message: str
-
-# ==========================================
-# ENDPOINT: AI CHAT (APP CONTROL INTEGRATED)
-# ==========================================
-@app.post("/api/chat")
-async def chat_with_ai(request: ChatRequest):
-    try:
-        my_api_key = os.environ.get("GEMINI_API_KEY")
-        client = genai.Client(api_key=my_api_key)
-        
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=request.message,
-            config=types.GenerateContentConfig(
-                system_instruction=APP_CONTROL_PROMPT,
-                response_mime_type="application/json",
-            )
-        )
-        
-        # Parse the JSON response from Gemini
-        ai_data = json.loads(response.text)
-        
-        # Return the parsed data back to Flutter
-        return {
-            "status": "success", 
-            "reply": ai_data.get("reply", "I am not sure how to respond to that."),
-            "action": ai_data.get("action"),
-            "target": ai_data.get("target")
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-from typing import List, Dict, Any
-import json
 
 class ChatRequest(BaseModel):
     message: str
@@ -401,10 +366,9 @@ async def extract_metadata(file: UploadFile = File(...)):
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         metadata = doc.metadata
         
-        # Format the metadata into a clean readable string
         result_text = "--- PDF Metadata ---\n"
         for key, value in metadata.items():
-            if value:  # Only show fields that have data
+            if value: 
                 result_text += f"{key.capitalize()}: {value}\n"
         
         if result_text == "--- PDF Metadata ---\n":
@@ -428,14 +392,12 @@ async def add_watermark(
         
         for page in doc:
             rect = page.rect
-            # Adjusted the point to center the text better horizontally
             point = fitz.Point(rect.width * 0.15, rect.height * 0.50)
             page.insert_text(
                 point, 
                 password, 
                 fontsize=60, 
                 color=(0.7, 0.7, 0.7) 
-                # Removed the rotate=45 parameter to prevent the crash
             )
             
         out_bytes = doc.write()
@@ -453,17 +415,14 @@ async def image_to_text(file: UploadFile = File(...)):
         my_api_key = os.environ.get("GEMINI_API_KEY")
         client = genai.Client(api_key=my_api_key)
         
-        # 1. Guess the correct MIME type based on the file extension
         mime_type, _ = mimetypes.guess_type(file.filename)
         
-        # 2. Provide a safe fallback if it still reads as a generic stream
         if not mime_type or mime_type == "application/octet-stream":
             if file.filename.lower().endswith('.png'):
                 mime_type = "image/png"
             else:
                 mime_type = "image/jpeg"
         
-        # 3. Package the image using the corrected MIME type
         image_part = types.Part.from_bytes(
             data=image_bytes,
             mime_type=mime_type,
@@ -493,11 +452,6 @@ async def compress_pdf(file: UploadFile = File(...)):
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         
         memory_file = io.BytesIO()
-        
-        # PyMuPDF Compression Magic:
-        # garbage=4: removes unused objects, duplicate objects, and compacts xref table
-        # deflate=True: compresses uncompressed streams
-        # deflate_images=True: tries to compress image streams further
         doc.save(memory_file, garbage=4, deflate=True, deflate_images=True)
         memory_file.seek(0)
         
@@ -544,7 +498,6 @@ async def rotate_pdf(file: UploadFile = File(...), input_data: str = Form("90"))
 @app.post("/api/split")
 async def split_pdf(file: UploadFile = File(...), input_data: str = Form("1-1")):
     try:
-        # Parse input like "1-5"
         parts = input_data.split('-')
         start_page = max(1, int(parts[0].strip()))
         end_page = int(parts[1].strip()) if len(parts) > 1 else start_page
@@ -635,3 +588,89 @@ async def translate_pdf(file: UploadFile = File(...), input_data: str = Form("Hi
         return {"status": "success", "result": response.text}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+# ==========================================
+# NEW ENDPOINT: PDF TO WORD
+# ==========================================
+@app.post("/api/toword")
+async def pdf_to_word(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    try:
+        # Create unique temporary filenames
+        pdf_path = f"temp_{uuid.uuid4().hex}_{file.filename}"
+        docx_path = pdf_path.replace('.pdf', '.docx')
+        
+        # Save uploaded PDF to disk
+        with open(pdf_path, "wb") as buffer:
+            buffer.write(await file.read())
+        
+        # Convert using pdf2docx
+        cv = Converter(pdf_path)
+        cv.convert(docx_path)
+        cv.close()
+        
+        # Define cleanup function to delete temp files after sending
+        def cleanup():
+            if os.path.exists(pdf_path): os.remove(pdf_path)
+            if os.path.exists(docx_path): os.remove(docx_path)
+            
+        background_tasks.add_task(cleanup)
+        
+        return FileResponse(
+            path=docx_path, 
+            filename=f"converted_{file.filename.replace('.pdf', '.docx')}",
+            media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        )
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# ==========================================
+# NEW ENDPOINT: PDF TO EXCEL
+# ==========================================
+@app.post("/api/toexcel")
+async def pdf_to_excel(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    try:
+        # Create unique temporary filenames
+        pdf_path = f"temp_{uuid.uuid4().hex}_{file.filename}"
+        excel_path = pdf_path.replace('.pdf', '.xlsx')
+        
+        # Save uploaded PDF to disk
+        with open(pdf_path, "wb") as buffer:
+            buffer.write(await file.read())
+            
+        all_tables = []
+        
+        # Extract tables using pdfplumber
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                for table in tables:
+                    if table:
+                        df = pd.DataFrame(table[1:], columns=table[0])
+                        all_tables.append(df)
+        
+        if not all_tables:
+            if os.path.exists(pdf_path): os.remove(pdf_path)
+            return {"status": "error", "message": "No tabular data found in this PDF"}
+            
+        # Combine all extracted tables into one dataframe and save as excel
+        final_df = pd.concat(all_tables, ignore_index=True)
+        final_df.to_excel(excel_path, index=False)
+        
+        # Define cleanup function to delete temp files after sending
+        def cleanup():
+            if os.path.exists(pdf_path): os.remove(pdf_path)
+            if os.path.exists(excel_path): os.remove(excel_path)
+            
+        background_tasks.add_task(cleanup)
+        
+        return FileResponse(
+            path=excel_path, 
+            filename=f"converted_{file.filename.replace('.pdf', '.xlsx')}",
+            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+if __name__ == '__main__':
+    import uvicorn
+    uvicorn.run(app, host='0.0.0.0', port=5000)
