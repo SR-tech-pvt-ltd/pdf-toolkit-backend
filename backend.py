@@ -764,3 +764,54 @@ async def excel_to_pdf(background_tasks: BackgroundTasks, file: UploadFile = Fil
 @app.post("/api/ppttopdf")
 async def ppt_to_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     return await convert_office_to_pdf_logic(background_tasks, file, "ppt")
+
+# ==========================================
+# NEW ENDPOINT: AI QUIZ GENERATOR
+# ==========================================
+@app.post("/api/quiz")
+async def generate_quiz(file: UploadFile = File(...)):
+    try:
+        my_api_key = os.environ.get("GEMINI_API_KEY")
+        client = genai.Client(api_key=my_api_key)
+        
+        pdf_bytes = await file.read()
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        extracted_text = ""
+        for page in doc:
+            extracted_text += page.get_text()
+            
+        if not extracted_text.strip():
+             return {"status": "error", "message": "No text found to generate a quiz."}
+
+        prompt = f"""Generate a 5-question multiple choice quiz based on the following text.
+        Return ONLY a valid JSON array of objects. Do not include any markdown formatting like ```json.
+        Strict format required:
+        [
+          {{
+            "question": "Question text?",
+            "options": ["Option A", "Option B", "Option C", "Option D"],
+            "answer": "Option A",
+            "explanation": "Brief explanation of why Option A is correct."
+          }}
+        ]
+
+        Text to quiz on:
+        {extracted_text[:20000]}""" # Limit text slightly to avoid token overload
+        
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+        
+        # Clean up response if Gemini ignores the "no markdown" rule
+        res_text = response.text.strip()
+        if res_text.startswith("```json"):
+            res_text = res_text[7:-3]
+        elif res_text.startswith("```"):
+            res_text = res_text[3:-3]
+
+        quiz_data = json.loads(res_text.strip())
+        
+        return {"status": "success", "result": quiz_data}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
