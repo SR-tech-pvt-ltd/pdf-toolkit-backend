@@ -3,7 +3,7 @@ import mimetypes
 import io
 import zipfile
 import PyPDF2
-import fitz  # PyMuPDF
+import pymupdf as fitz  # PyMuPDF
 import uuid
 import json
 from typing import List, Dict, Any
