@@ -771,7 +771,7 @@ async def ppt_to_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(
 # ENDPOINT: AI QUIZ GENERATOR
 # ==========================================
 @app.post("/api/quiz")
-async def generate_quiz(file: UploadFile = File(...), num_questions: str = Form("5")):
+async def generate_quiz(file: UploadFile = File(...), num_questions: str = Form("5"), difficulty: str = Form("Medium")):
     try:
         import os
         import fitz
@@ -790,8 +790,9 @@ async def generate_quiz(file: UploadFile = File(...), num_questions: str = Form(
         if not extracted_text.strip():
              return {"status": "error", "message": "No text found to generate a quiz."}
 
-        # Dynamically inject the requested number of questions into the prompt
-        prompt = f"""Generate a {num_questions}-question multiple choice quiz based on the following text.
+        # Dynamically inject the requested number of questions AND difficulty
+        prompt = f"""Generate a {num_questions}-question multiple choice quiz at a {difficulty} difficulty level based on the following text. 
+        If 'Easy', focus on broad concepts and definitions. If 'Medium', focus on application and understanding. If 'Hard', focus on nuanced details, tricky distractors, and critical analysis.
         Return ONLY a valid JSON array of objects. Do not include any markdown formatting like ```json.
         Strict format required:
         [
@@ -811,7 +812,6 @@ async def generate_quiz(file: UploadFile = File(...), num_questions: str = Form(
             contents=prompt
         )
         
-        # Clean up response if Gemini ignores the "no markdown" rule
         res_text = response.text.strip()
         if res_text.startswith("```json"):
             res_text = res_text[7:-3]
