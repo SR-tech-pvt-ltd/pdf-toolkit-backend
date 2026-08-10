@@ -1,6 +1,8 @@
 import os
 import mimetypes
 import io
+import cv2
+import numpy as np
 import zipfile
 import PyPDF2
 import pymupdf as fitz  # PyMuPDF
@@ -814,4 +816,94 @@ async def generate_quiz(file: UploadFile = File(...)):
         
         return {"status": "success", "result": quiz_data}
     except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# ==========================================
+# NEW ENDPOINT: AI SCAN ENHANCER (OPENCV)
+# ==========================================
+@app.post("/api/enhance-scan")
+async def enhance_scan(background_tasks: BackgroundTasks, file: UploadFile = File(...), filter_type: str = Form(...)):
+    """Receives a scanned PDF, extracts the images, applies advanced AI/OpenCV filters, and returns a new PDF."""
+    try:
+        print(f"🪄 Applying {filter_type} filter to {file.filename}...")
+        pdf_bytes = await file.read()
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        out_doc = fitz.open()
+
+        for page_num in range(len(doc)):
+            page = doc.load_page(page_num)
+            # Render page to high-quality image
+            pix = page.get_pixmap(dpi=200) 
+            
+            # Convert PyMuPDF image to OpenCV format
+            img_data = pix.tobytes("png")
+            nparr = np.frombuffer(img_data, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+            # --- APPLY OPENCV FILTERS ---
+            if filter_type == "Enhance":
+                lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+                l_channel, a, b = cv2.split(lab)
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+                cl = clahe.apply(l_channel)
+                img = cv2.cvtColor(cv2.merge((cl,a,b)), cv2.COLOR_LAB2BGR)
+                
+            elif filter_type == "Soft":
+                img = cv2.bilateralFilter(img, 9, 75, 75)
+                
+            elif filter_type == "Brighten":
+                hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+                h, s, v = cv2.split(hsv)
+                v = cv2.add(v, 50)
+                v = np.clip(v, 0, 255)
+                img = cv2.cvtColor(cv2.merge((h, s, v)), cv2.COLOR_HSV2BGR)
+                
+            elif filter_type == "Remove Shadow":
+                rgb_planes = cv2.split(img)
+                result_planes = []
+                for plane in rgb_planes:
+                    dilated_img = cv2.dilate(plane, np.ones((7,7), np.uint8))
+                    bg_img = cv2.medianBlur(dilated_img, 21)
+                    diff_img = 255 - cv2.absdiff(plane, bg_img)
+                    norm_img = cv2.normalize(diff_img, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8UC1)
+                    result_planes.append(norm_img)
+                img = cv2.merge(result_planes)
+                
+            elif filter_type == "Erase Handwriting":
+                # Converts to grayscale, drastically thresholds to remove lighter pen ink, and uses morphological opening
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                _, thresh = cv2.threshold(gray, 120, 255, cv2.THRESH_BINARY)
+                kernel = np.ones((2,2), np.uint8)
+                img = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                
+            elif filter_type == "Remove Moire":
+                # Heavy denoising for screen patterns
+                img = cv2.fastNlMeansDenoisingColored(img, None, 10, 10, 7, 21)
+
+            # --- CONVERT BACK TO PDF ---
+            is_success, buffer = cv2.imencode(".png", img)
+            img_doc = fitz.open(stream=buffer.tobytes(), filetype="png")
+            pdf_bytes_page = img_doc.convert_to_pdf()
+            img_doc.close()
+            
+            temp_pdf = fitz.open("pdf", pdf_bytes_page)
+            out_doc.insert_pdf(temp_pdf)
+            temp_pdf.close()
+
+        memory_file = io.BytesIO()
+        out_doc.save(memory_file)
+        memory_file.seek(0)
+        
+        doc.close()
+        out_doc.close()
+
+        print("✅ Filter applied successfully!")
+        return StreamingResponse(
+            memory_file, 
+            media_type='application/pdf',
+            headers={'Content-Disposition': f'attachment; filename="enhanced_{file.filename}"'}
+        )
+    except Exception as e:
+        print(f"⚠️ Error enhancing scan: {str(e)}")
         return {"status": "error", "message": str(e)}
