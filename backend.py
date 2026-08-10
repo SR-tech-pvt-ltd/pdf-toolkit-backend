@@ -819,12 +819,18 @@ async def generate_quiz(file: UploadFile = File(...)):
         return {"status": "error", "message": str(e)}
 
 # ==========================================
-# NEW ENDPOINT: AI SCAN ENHANCER (OPENCV)
+# ENDPOINT: AI SCAN ENHANCER (OPENCV)
 # ==========================================
 @app.post("/api/enhance-scan")
 async def enhance_scan(background_tasks: BackgroundTasks, file: UploadFile = File(...), filter_type: str = Form(...)):
     """Receives a scanned PDF, extracts the images, applies advanced AI/OpenCV filters, and returns a new PDF."""
     try:
+        import io
+        import cv2
+        import numpy as np
+        import fitz
+        from fastapi.responses import StreamingResponse
+
         print(f"🪄 Applying {filter_type} filter to {file.filename}...")
         pdf_bytes = await file.read()
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -832,19 +838,46 @@ async def enhance_scan(background_tasks: BackgroundTasks, file: UploadFile = Fil
 
         for page_num in range(len(doc)):
             page = doc.load_page(page_num)
-            # Render page to high-quality image
             pix = page.get_pixmap(dpi=200) 
             
-            # Convert PyMuPDF image to OpenCV format
             img_data = pix.tobytes("png")
             nparr = np.frombuffer(img_data, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-            # --- APPLY OPENCV FILTERS ---
-            if filter_type == "Enhance":
+            # --- NEW COMBINED OPENCV FILTERS ---
+            if filter_type == "Auto":
+                lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+                l, a, b = cv2.split(lab)
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+                l = clahe.apply(l)
+                img = cv2.cvtColor(cv2.merge((l,a,b)), cv2.COLOR_LAB2BGR)
+                
+            elif filter_type == "Color":
+                hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
+                hsv[:, :, 1] = hsv[:, :, 1] * 1.3 # Boost saturation by 30%
+                hsv[:, :, 1] = np.clip(hsv[:, :, 1], 0, 255)
+                img = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+                
+            elif filter_type == "Grayscale":
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+                
+            elif filter_type == "B&W":
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 15)
+                img = cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR)
+                
+            elif filter_type == "Shadows":
+                hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
+                h, s, v = cv2.split(hsv)
+                v = v + (255 - v) * 0.4 # Recover shadows by boosting darker areas
+                v = np.clip(v, 0, 255)
+                img = cv2.cvtColor(cv2.merge((h, s, v)).astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+            elif filter_type == "Enhance":
                 lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
                 l_channel, a, b = cv2.split(lab)
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+                clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8,8))
                 cl = clahe.apply(l_channel)
                 img = cv2.cvtColor(cv2.merge((cl,a,b)), cv2.COLOR_LAB2BGR)
                 
@@ -870,7 +903,6 @@ async def enhance_scan(background_tasks: BackgroundTasks, file: UploadFile = Fil
                 img = cv2.merge(result_planes)
                 
             elif filter_type == "Erase Handwriting":
-                # Converts to grayscale, drastically thresholds to remove lighter pen ink, and uses morphological opening
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 _, thresh = cv2.threshold(gray, 120, 255, cv2.THRESH_BINARY)
                 kernel = np.ones((2,2), np.uint8)
@@ -878,7 +910,6 @@ async def enhance_scan(background_tasks: BackgroundTasks, file: UploadFile = Fil
                 img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
                 
             elif filter_type == "Remove Moire":
-                # Heavy denoising for screen patterns
                 img = cv2.fastNlMeansDenoisingColored(img, None, 10, 10, 7, 21)
 
             # --- CONVERT BACK TO PDF ---
