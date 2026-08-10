@@ -676,10 +676,6 @@ async def pdf_to_excel(background_tasks: BackgroundTasks, file: UploadFile = Fil
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-if __name__ == '__main__':
-    import uvicorn
-    uvicorn.run(app, host='0.0.0.0', port=5000)
-
 # ==========================================
 # NEW ENDPOINT: PDF TO POWERPOINT (PPTX)
 # ==========================================
@@ -773,14 +769,6 @@ async def ppt_to_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(
 @app.post("/api/quiz")
 async def generate_quiz(file: UploadFile = File(...), num_questions: str = Form("5"), difficulty: str = Form("Medium")):
     try:
-        import os
-        import fitz
-        import json
-        from google import genai
-        
-        my_api_key = os.environ.get("GEMINI_API_KEY")
-        client = genai.Client(api_key=my_api_key)
-        
         pdf_bytes = await file.read()
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         extracted_text = ""
@@ -828,15 +816,9 @@ async def generate_quiz(file: UploadFile = File(...), num_questions: str = Form(
 # ENDPOINT: AI SCAN ENHANCER (OPENCV)
 # ==========================================
 @app.post("/api/enhance-scan")
-async def enhance_scan(background_tasks: BackgroundTasks, file: UploadFile = File(...), filter_type: str = Form(...)):
+async def enhance_scan(file: UploadFile = File(...), filter_type: str = Form(...)):
     """Receives a scanned PDF, extracts the images, applies advanced AI/OpenCV filters, and returns a new PDF."""
     try:
-        import io
-        import cv2
-        import numpy as np
-        import fitz
-        from fastapi.responses import StreamingResponse
-
         print(f"🪄 Applying {filter_type} filter to {file.filename}...")
         pdf_bytes = await file.read()
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -944,3 +926,7 @@ async def enhance_scan(background_tasks: BackgroundTasks, file: UploadFile = Fil
     except Exception as e:
         print(f"⚠️ Error enhancing scan: {str(e)}")
         return {"status": "error", "message": str(e)}
+
+if __name__ == '__main__':
+    import uvicorn
+    uvicorn.run(app, host='0.0.0.0', port=5000)
