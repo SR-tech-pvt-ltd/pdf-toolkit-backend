@@ -768,11 +768,16 @@ async def ppt_to_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(
     return await convert_office_to_pdf_logic(background_tasks, file, "ppt")
 
 # ==========================================
-# NEW ENDPOINT: AI QUIZ GENERATOR
+# ENDPOINT: AI QUIZ GENERATOR
 # ==========================================
 @app.post("/api/quiz")
-async def generate_quiz(file: UploadFile = File(...)):
+async def generate_quiz(file: UploadFile = File(...), num_questions: str = Form("5")):
     try:
+        import os
+        import fitz
+        import json
+        from google import genai
+        
         my_api_key = os.environ.get("GEMINI_API_KEY")
         client = genai.Client(api_key=my_api_key)
         
@@ -785,7 +790,8 @@ async def generate_quiz(file: UploadFile = File(...)):
         if not extracted_text.strip():
              return {"status": "error", "message": "No text found to generate a quiz."}
 
-        prompt = f"""Generate a 5-question multiple choice quiz based on the following text.
+        # Dynamically inject the requested number of questions into the prompt
+        prompt = f"""Generate a {num_questions}-question multiple choice quiz based on the following text.
         Return ONLY a valid JSON array of objects. Do not include any markdown formatting like ```json.
         Strict format required:
         [
@@ -798,7 +804,7 @@ async def generate_quiz(file: UploadFile = File(...)):
         ]
 
         Text to quiz on:
-        {extracted_text[:20000]}""" # Limit text slightly to avoid token overload
+        {extracted_text[:20000]}""" 
         
         response = client.models.generate_content(
             model='gemini-2.5-flash',
