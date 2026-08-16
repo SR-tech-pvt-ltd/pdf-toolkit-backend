@@ -927,6 +927,53 @@ async def enhance_scan(file: UploadFile = File(...), filter_type: str = Form(...
         print(f"⚠️ Error enhancing scan: {str(e)}")
         return {"status": "error", "message": str(e)}
 
+# ==========================================
+# NEW ENDPOINT: SMART IMAGE RESIZER (CUSTOM KB)
+# ==========================================
+@app.post("/api/compressimage")
+async def compress_image(file: UploadFile = File(...), target_kb: str = Form("30")):
+    """Compresses an image to be strictly under the target KB size."""
+    try:
+        # Convert target KB to Bytes
+        target_bytes = int(target_kb.strip()) * 1024
+        
+        image_bytes = await file.read()
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if img is None:
+             return {"status": "error", "message": "Invalid image format."}
+
+        quality = 95
+        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+        is_success, buffer = cv2.imencode(".jpg", img, encode_param)
+
+        # Step 1: Reduce quality iteratively
+        while len(buffer) > target_bytes and quality > 10:
+            quality -= 5
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+            is_success, buffer = cv2.imencode(".jpg", img, encode_param)
+
+        # Step 2: If it is still too big, shrink the resolution (scale down)
+        scale = 1.0
+        while len(buffer) > target_bytes and scale > 0.1:
+            scale -= 0.1
+            width = int(img.shape[1] * scale)
+            height = int(img.shape[0] * scale)
+            resized = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
+            is_success, buffer = cv2.imencode(".jpg", resized, encode_param)
+
+        memory_file = io.BytesIO(buffer.tobytes())
+        memory_file.seek(0)
+
+        return StreamingResponse(
+            memory_file, 
+            media_type='image/jpeg',
+            headers={'Content-Disposition': f'attachment; filename="compressed_{file.filename.rsplit(".", 1)[0]}.jpg"'}
+        )
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run(app, host='0.0.0.0', port=5000)
