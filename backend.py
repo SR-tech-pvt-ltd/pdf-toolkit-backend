@@ -406,7 +406,13 @@ async def add_watermark(
             )
             
         out_bytes = doc.write()
-        return Response(content=out_bytes, media_type="application/pdf")
+        memory_file = io.BytesIO(out_bytes)
+        
+        return StreamingResponse(
+            memory_file, 
+            media_type='application/pdf',
+            headers={'Content-Disposition': f'attachment; filename="watermarked_{file.filename}"'}
+        )
     except Exception as e:
         return {"status": "error", "message": str(e)}
         
