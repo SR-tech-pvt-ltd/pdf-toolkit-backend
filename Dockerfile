@@ -1,21 +1,36 @@
-# 1. Use an official, lightweight Python environment
-FROM python:3.11-slim
+# Use an official lightweight Python image
+FROM python:3.10-slim
 
-# 2. Install LibreOffice required for Word/Excel/PPT to PDF conversions
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends libreoffice && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+# Prevent Python from writing pyc files and keep stdout unbuffered
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
-# 3. Set the working directory inside the server
+# Install LibreOffice, OpenCV dependencies, and Java (required by LibreOffice)
+RUN apt-get update && apt-get install -y \
+    libreoffice \
+    libreoffice-writer \
+    libreoffice-calc \
+    libreoffice-impress \
+    default-jre \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set the working directory inside the container
 WORKDIR /app
 
-# 4. Copy your requirements file and install Python packages
+# Copy the requirements file first to leverage Docker layer caching
 COPY requirements.txt .
+
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 5. Copy your backend.py file into the server
+# Copy the rest of your application code into the container
 COPY . .
 
-# 6. Boot up the Uvicorn server on Render's required port
-CMD ["sh", "-c", "uvicorn backend:app --host 0.0.0.0 --port ${PORT:-10000}"]
+# Expose the port that FastAPI will run on
+EXPOSE 5000
+
+# Command to start the Uvicorn server
+# NOTE: Ensure your main python file is named 'backend.py'
+CMD ["uvicorn", "backend:app", "--host", "0.0.0.0", "--port", "5000"]
