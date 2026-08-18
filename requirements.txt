@@ -3,9 +3,11 @@ uvicorn
 python-multipart
 PyPDF2
 pymupdf
-google-genai
+opencv-python-headless
+numpy
+python-pptx
 pdf2docx
 pdfplumber
 pandas
 openpyxl
-python-pptx
+google-genai
