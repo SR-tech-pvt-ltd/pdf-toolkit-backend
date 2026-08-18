@@ -5,14 +5,15 @@ FROM python:3.10-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Install LibreOffice, OpenCV dependencies, and Java (required by LibreOffice)
+# Install LibreOffice, OpenCV dependencies, and Java
+# FIXED: Replaced obsolete 'libgl1-mesa-glx' with modern 'libgl1'
 RUN apt-get update && apt-get install -y \
     libreoffice \
     libreoffice-writer \
     libreoffice-calc \
     libreoffice-impress \
     default-jre \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -32,5 +33,4 @@ COPY . .
 EXPOSE 5000
 
 # Command to start the Uvicorn server
-# NOTE: Ensure your main python file is named 'backend.py'
 CMD ["uvicorn", "backend:app", "--host", "0.0.0.0", "--port", "5000"]
