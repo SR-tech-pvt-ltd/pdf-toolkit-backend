@@ -11,3 +11,5 @@ pdfplumber
 pandas
 openpyxl
 google-genai
+openai
+groq
