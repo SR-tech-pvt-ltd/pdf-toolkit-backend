@@ -101,7 +101,7 @@ def get_ai_response(model_choice: str, message: str, history: List[Dict[str, str
         msgs.append({"role": "user", "content": message})
         
         resp = groq_client.chat.completions.create(
-            model="gemma2-9b-it", # FIXED: Using Google's highly stable Gemma 2 model hosted on Groq
+            model="groq/compound-mini", # FIXED: Using the exact Production System ID from your video!
             messages=msgs,
             response_format={"type": "json_object"}
         )
