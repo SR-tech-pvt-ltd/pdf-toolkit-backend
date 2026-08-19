@@ -101,7 +101,7 @@ def get_ai_response(model_choice: str, message: str, history: List[Dict[str, str
         msgs.append({"role": "user", "content": message})
         
         resp = groq_client.chat.completions.create(
-            model="llama-3.1-70b-versatile", # FIXED: Switched to Groq's flagship stable model
+            model="gemma2-9b-it", # FIXED: Using Google's highly stable Gemma 2 model hosted on Groq
             messages=msgs,
             response_format={"type": "json_object"}
         )
