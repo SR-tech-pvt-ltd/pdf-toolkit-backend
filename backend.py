@@ -101,7 +101,7 @@ def get_ai_response(model_choice: str, message: str, history: List[Dict[str, str
         msgs.append({"role": "user", "content": message})
         
         resp = groq_client.chat.completions.create(
-            model="mixtral-8x7b-32768", # FIXED: Switched to an ultra-stable, universally available model
+            model="llama-3.1-70b-versatile", # FIXED: Switched to Groq's flagship stable model
             messages=msgs,
             response_format={"type": "json_object"}
         )
