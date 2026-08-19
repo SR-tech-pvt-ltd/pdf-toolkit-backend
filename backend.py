@@ -70,6 +70,62 @@ def read_root():
     return {"message": "PDF Toolkit Backend is running!"}
 
 # ==========================================
+# HELPER: MULTI-MODEL ROUTER
+# ==========================================
+def get_ai_response(model_choice: str, message: str, history: List[Dict[str, str]]):
+    """Routes the prompt and history to Gemini, OpenAI, or Groq based on user selection."""
+    
+    if model_choice == "OpenAI":
+        import openai
+        openai_client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        msgs = [{"role": "system", "content": APP_CONTROL_PROMPT}]
+        for h in history:
+            role = "user" if h.get("sender") == "user" else "assistant"
+            msgs.append({"role": role, "content": h.get("text", "")})
+        msgs.append({"role": "user", "content": message})
+        
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini", # Extremely fast and cost-effective OpenAI model
+            messages=msgs,
+            response_format={"type": "json_object"}
+        )
+        return resp.choices[0].message.content
+
+    elif model_choice == "Groq":
+        from groq import Groq
+        groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+        msgs = [{"role": "system", "content": APP_CONTROL_PROMPT}]
+        for h in history:
+            role = "user" if h.get("sender") == "user" else "assistant"
+            msgs.append({"role": role, "content": h.get("text", "")})
+        msgs.append({"role": "user", "content": message})
+        
+        resp = groq_client.chat.completions.create(
+            model="llama3-8b-8192", # Extremely fast LLaMA 3 model via Groq
+            messages=msgs,
+            response_format={"type": "json_object"}
+        )
+        return resp.choices[0].message.content
+
+    else:
+        # Default fallback: Gemini 2.5 Flash
+        contents = []
+        for h in history:
+            role = "user" if h.get("sender") == "user" else "model"
+            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=h.get("text", ""))]))
+        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=message)]))
+        
+        resp = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=APP_CONTROL_PROMPT,
+                response_mime_type="application/json",
+            )
+        )
+        return resp.text
+
+# ==========================================
 # ENDPOINT: AI PDF SUMMARY (Single File)
 # ==========================================
 @app.post("/api/summarize")
@@ -262,39 +318,23 @@ async def unlock_pdf(file: UploadFile = File(...), password: str = Form(...)):
 class ChatRequest(BaseModel):
     message: str
     history: List[Dict[str, str]] = [] # Accepts the chat history
+    model_choice: str = "Gemini" # NEW: Accept model choice
 
 # ==========================================
-# ENDPOINT: AI CHAT (APP CONTROL & MEMORY INTEGRATED)
+# ENDPOINT: AI CHAT (MULTI-MODEL SUPPORT)
 # ==========================================
 @app.post("/api/chat")
 async def chat_with_ai(request: ChatRequest):
     try:
-        my_api_key = os.environ.get("GEMINI_API_KEY")
-        client = genai.Client(api_key=my_api_key)
+        raw_response = get_ai_response(request.model_choice, request.message, request.history)
         
-        # 1. Build the conversation history for Gemini
-        contents = []
-        for msg in request.history:
-            role = "user" if msg.get("sender") == "user" else "model"
-            contents.append(
-                types.Content(role=role, parts=[types.Part.from_text(text=msg.get("text", ""))])
-            )
+        # Clean JSON markdown blocks if any model returns them
+        if raw_response.startswith("```json"):
+            raw_response = raw_response[7:-3]
+        elif raw_response.startswith("```"):
+            raw_response = raw_response[3:-3]
             
-        # 2. Add the current message
-        contents.append(
-            types.Content(role="user", parts=[types.Part.from_text(text=request.message)])
-        )
-        
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=APP_CONTROL_PROMPT,
-                response_mime_type="application/json",
-            )
-        )
-        
-        ai_data = json.loads(response.text)
+        ai_data = json.loads(raw_response.strip())
         
         return {
             "status": "success", 
@@ -303,21 +343,19 @@ async def chat_with_ai(request: ChatRequest):
             "target": ai_data.get("target")
         }
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"Model routing error: {str(e)}"}
 
 # ==========================================
-# ENDPOINT: AI CHAT (FILE ATTACHED WITH MEMORY)
+# ENDPOINT: AI CHAT WITH FILE (MULTI-MODEL)
 # ==========================================
 @app.post("/api/chat/file")
 async def chat_with_file(
     file: UploadFile = File(...), 
     message: str = Form("Please summarize this document in detail."),
-    history: str = Form("[]") # Receives history as a JSON string
+    history: str = Form("[]"), # Receives history as a JSON string
+    model_choice: str = Form("Gemini") # NEW: Accept model choice
 ):
     try:
-        my_api_key = os.environ.get("GEMINI_API_KEY")
-        client = genai.Client(api_key=my_api_key)
-        
         # Extract text from the uploaded PDF
         pdf_bytes = await file.read()
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -325,32 +363,17 @@ async def chat_with_file(
         for page in doc:
             extracted_text += page.get_text()
             
-        # Build the conversation history for Gemini
-        contents = []
         parsed_history = json.loads(history)
-        for msg in parsed_history:
-            role = "user" if msg.get("sender") == "user" else "model"
-            contents.append(
-                types.Content(role=role, parts=[types.Part.from_text(text=msg.get("text", ""))])
-            )
+        full_prompt = f"{message}\n\n--- Document Content ---\n{extracted_text[:25000]}" # Limit large PDFs to prevent token overload
+        
+        raw_response = get_ai_response(model_choice, full_prompt, parsed_history)
+        
+        if raw_response.startswith("```json"):
+            raw_response = raw_response[7:-3]
+        elif raw_response.startswith("```"):
+            raw_response = raw_response[3:-3]
             
-        # Combine the user's prompt with the document text
-        full_prompt = f"{message}\n\n--- Document Content ---\n{extracted_text}"
-        contents.append(
-            types.Content(role="user", parts=[types.Part.from_text(text=full_prompt)])
-        )
-        
-        # Send to Gemini
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=APP_CONTROL_PROMPT,
-                response_mime_type="application/json",
-            )
-        )
-        
-        ai_data = json.loads(response.text)
+        ai_data = json.loads(raw_response.strip())
         
         return {
             "status": "success", 
@@ -359,7 +382,7 @@ async def chat_with_file(
             "target": ai_data.get("target")
         }
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"File routing error: {str(e)}"}
 
 # ==========================================
 # 1. PDF METADATA INSPECTOR
@@ -660,326 +683,4 @@ async def pdf_to_excel(background_tasks: BackgroundTasks, file: UploadFile = Fil
                         all_tables.append(df)
         
         if not all_tables:
-            if os.path.exists(pdf_path): os.remove(pdf_path)
-            return {"status": "error", "message": "No tabular data found in this PDF"}
-            
-        # Combine all extracted tables into one dataframe and save as excel
-        final_df = pd.concat(all_tables, ignore_index=True)
-        final_df.to_excel(excel_path, index=False)
-        
-        # Define cleanup function to delete temp files after sending
-        def cleanup():
-            if os.path.exists(pdf_path): os.remove(pdf_path)
-            if os.path.exists(excel_path): os.remove(excel_path)
-            
-        background_tasks.add_task(cleanup)
-        
-        return FileResponse(
-            path=excel_path, 
-            filename=f"converted_{file.filename.replace('.pdf', '.xlsx')}",
-            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-# ==========================================
-# NEW ENDPOINT: PDF TO POWERPOINT (PPTX)
-# ==========================================
-@app.post("/api/pdftoppt")
-async def pdf_to_ppt(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    """Converts a PDF into a PowerPoint by turning each page into an image slide."""
-    try:
-        pdf_path = f"temp_{uuid.uuid4().hex}_{file.filename}"
-        pptx_path = pdf_path.replace('.pdf', '.pptx')
-        
-        with open(pdf_path, "wb") as buffer:
-            buffer.write(await file.read())
-            
-        doc = fitz.open(pdf_path)
-        prs = Presentation()
-        blank_slide_layout = prs.slide_layouts[6] # 6 is the layout for a blank slide
-        
-        for page_num in range(len(doc)):
-            page = doc.load_page(page_num)
-            pix = page.get_pixmap(dpi=150)
-            img_path = f"temp_img_{uuid.uuid4().hex}.png"
-            pix.save(img_path)
-            
-            slide = prs.slides.add_slide(blank_slide_layout)
-            # Add image to fill the entire slide
-            slide.shapes.add_picture(img_path, 0, 0, width=prs.slide_width, height=prs.slide_height)
-            os.remove(img_path)
-            
-        prs.save(pptx_path)
-        
-        def cleanup():
-            if os.path.exists(pdf_path): os.remove(pdf_path)
-            if os.path.exists(pptx_path): os.remove(pptx_path)
-            
-        background_tasks.add_task(cleanup)
-        
-        return FileResponse(
-            path=pptx_path, 
-            filename=f"converted_{file.filename.replace('.pdf', '.pptx')}",
-            media_type='application/vnd.openxmlformats-officedocument.presentationml.presentation'
-        )
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-# ==========================================
-# NEW ENDPOINTS: OFFICE (Word/Excel/PPT) TO PDF
-# ==========================================
-async def convert_office_to_pdf_logic(background_tasks, file, extension):
-    """Core logic using LibreOffice headless to convert any office format to PDF."""
-    try:
-        input_path = f"temp_{uuid.uuid4().hex}_{file.filename}"
-        output_dir = os.path.dirname(os.path.abspath(input_path)) or "."
-        
-        with open(input_path, "wb") as buffer:
-            buffer.write(await file.read())
-            
-        # Execute LibreOffice headless conversion
-        subprocess.run(["libreoffice", "--headless", "--convert-to", "pdf", input_path, "--outdir", output_dir], check=True)
-        
-        pdf_path = input_path.rsplit('.', 1)[0] + ".pdf"
-        
-        def cleanup():
-            if os.path.exists(input_path): os.remove(input_path)
-            if os.path.exists(pdf_path): os.remove(pdf_path)
-            
-        background_tasks.add_task(cleanup)
-        
-        return FileResponse(
-            path=pdf_path, 
-            filename=f"converted_{file.filename.rsplit('.', 1)[0]}.pdf",
-            media_type='application/pdf'
-        )
-    except Exception as e:
-        return {"status": "error", "message": f"Server requires LibreOffice. Error: {str(e)}"}
-
-@app.post("/api/wordtopdf")
-async def word_to_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    return await convert_office_to_pdf_logic(background_tasks, file, "word")
-
-@app.post("/api/exceltopdf")
-async def excel_to_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    return await convert_office_to_pdf_logic(background_tasks, file, "excel")
-
-@app.post("/api/ppttopdf")
-async def ppt_to_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    return await convert_office_to_pdf_logic(background_tasks, file, "ppt")
-
-# ==========================================
-# ENDPOINT: AI QUIZ GENERATOR
-# ==========================================
-@app.post("/api/quiz")
-async def generate_quiz(file: UploadFile = File(...), num_questions: str = Form("5"), difficulty: str = Form("Medium")):
-    try:
-        pdf_bytes = await file.read()
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        extracted_text = ""
-        for page in doc:
-            extracted_text += page.get_text()
-            
-        if not extracted_text.strip():
-             return {"status": "error", "message": "No text found to generate a quiz."}
-
-        # Dynamically inject the requested number of questions AND difficulty
-        prompt = f"""Generate a {num_questions}-question multiple choice quiz at a {difficulty} difficulty level based on the following text. 
-        If 'Easy', focus on broad concepts and definitions. If 'Medium', focus on application and understanding. If 'Hard', focus on nuanced details, tricky distractors, and critical analysis.
-        Return ONLY a valid JSON array of objects. Do not include any markdown formatting like ```json.
-        Strict format required:
-        [
-          {{
-            "question": "Question text?",
-            "options": ["Option A", "Option B", "Option C", "Option D"],
-            "answer": "Option A",
-            "explanation": "Brief explanation of why Option A is correct."
-          }}
-        ]
-
-        Text to quiz on:
-        {extracted_text[:20000]}""" 
-        
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
-        
-        res_text = response.text.strip()
-        if res_text.startswith("```json"):
-            res_text = res_text[7:-3]
-        elif res_text.startswith("```"):
-            res_text = res_text[3:-3]
-
-        quiz_data = json.loads(res_text.strip())
-        
-        return {"status": "success", "result": quiz_data}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-# ==========================================
-# ENDPOINT: AI SCAN ENHANCER (OPENCV)
-# ==========================================
-@app.post("/api/enhance-scan")
-async def enhance_scan(file: UploadFile = File(...), filter_type: str = Form(...)):
-    """Receives a scanned PDF, extracts the images, applies advanced AI/OpenCV filters, and returns a new PDF."""
-    try:
-        print(f"🪄 Applying {filter_type} filter to {file.filename}...")
-        pdf_bytes = await file.read()
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        out_doc = fitz.open()
-
-        for page_num in range(len(doc)):
-            page = doc.load_page(page_num)
-            pix = page.get_pixmap(dpi=200) 
-            
-            img_data = pix.tobytes("png")
-            nparr = np.frombuffer(img_data, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-            # --- NEW COMBINED OPENCV FILTERS ---
-            if filter_type == "Auto":
-                lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-                l, a, b = cv2.split(lab)
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-                l = clahe.apply(l)
-                img = cv2.cvtColor(cv2.merge((l,a,b)), cv2.COLOR_LAB2BGR)
-                
-            elif filter_type == "Color":
-                hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
-                hsv[:, :, 1] = hsv[:, :, 1] * 1.3 # Boost saturation by 30%
-                hsv[:, :, 1] = np.clip(hsv[:, :, 1], 0, 255)
-                img = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-                
-            elif filter_type == "Grayscale":
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-                
-            elif filter_type == "B&W":
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 15)
-                img = cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR)
-                
-            elif filter_type == "Shadows":
-                hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
-                h, s, v = cv2.split(hsv)
-                v = v + (255 - v) * 0.4 # Recover shadows by boosting darker areas
-                v = np.clip(v, 0, 255)
-                img = cv2.cvtColor(cv2.merge((h, s, v)).astype(np.uint8), cv2.COLOR_HSV2BGR)
-
-            elif filter_type == "Enhance":
-                lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-                l_channel, a, b = cv2.split(lab)
-                clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8,8))
-                cl = clahe.apply(l_channel)
-                img = cv2.cvtColor(cv2.merge((cl,a,b)), cv2.COLOR_LAB2BGR)
-                
-            elif filter_type == "Soft":
-                img = cv2.bilateralFilter(img, 9, 75, 75)
-                
-            elif filter_type == "Brighten":
-                hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-                h, s, v = cv2.split(hsv)
-                v = cv2.add(v, 50)
-                v = np.clip(v, 0, 255)
-                img = cv2.cvtColor(cv2.merge((h, s, v)), cv2.COLOR_HSV2BGR)
-                
-            elif filter_type == "Remove Shadow":
-                rgb_planes = cv2.split(img)
-                result_planes = []
-                for plane in rgb_planes:
-                    dilated_img = cv2.dilate(plane, np.ones((7,7), np.uint8))
-                    bg_img = cv2.medianBlur(dilated_img, 21)
-                    diff_img = 255 - cv2.absdiff(plane, bg_img)
-                    norm_img = cv2.normalize(diff_img, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8UC1)
-                    result_planes.append(norm_img)
-                img = cv2.merge(result_planes)
-                
-            elif filter_type == "Erase Handwriting":
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                _, thresh = cv2.threshold(gray, 120, 255, cv2.THRESH_BINARY)
-                kernel = np.ones((2,2), np.uint8)
-                img = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-                
-            elif filter_type == "Remove Moire":
-                img = cv2.fastNlMeansDenoisingColored(img, None, 10, 10, 7, 21)
-
-            # --- CONVERT BACK TO PDF ---
-            is_success, buffer = cv2.imencode(".png", img)
-            img_doc = fitz.open(stream=buffer.tobytes(), filetype="png")
-            pdf_bytes_page = img_doc.convert_to_pdf()
-            img_doc.close()
-            
-            temp_pdf = fitz.open("pdf", pdf_bytes_page)
-            out_doc.insert_pdf(temp_pdf)
-            temp_pdf.close()
-
-        memory_file = io.BytesIO()
-        out_doc.save(memory_file)
-        memory_file.seek(0)
-        
-        doc.close()
-        out_doc.close()
-
-        print("✅ Filter applied successfully!")
-        return StreamingResponse(
-            memory_file, 
-            media_type='application/pdf',
-            headers={'Content-Disposition': f'attachment; filename="enhanced_{file.filename}"'}
-        )
-    except Exception as e:
-        print(f"⚠️ Error enhancing scan: {str(e)}")
-        return {"status": "error", "message": str(e)}
-
-# ==========================================
-# NEW ENDPOINT: SMART IMAGE RESIZER (CUSTOM KB)
-# ==========================================
-@app.post("/api/compressimage")
-async def compress_image(file: UploadFile = File(...), target_kb: str = Form("30")):
-    """Compresses an image to be strictly under the target KB size."""
-    try:
-        # Convert target KB to Bytes
-        target_bytes = int(target_kb.strip()) * 1024
-        
-        image_bytes = await file.read()
-        nparr = np.frombuffer(image_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-        if img is None:
-             return {"status": "error", "message": "Invalid image format."}
-
-        quality = 95
-        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
-        is_success, buffer = cv2.imencode(".jpg", img, encode_param)
-
-        # Step 1: Reduce quality iteratively
-        while len(buffer) > target_bytes and quality > 10:
-            quality -= 5
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
-            is_success, buffer = cv2.imencode(".jpg", img, encode_param)
-
-        # Step 2: If it is still too big, shrink the resolution (scale down)
-        scale = 1.0
-        while len(buffer) > target_bytes and scale > 0.1:
-            scale -= 0.1
-            width = int(img.shape[1] * scale)
-            height = int(img.shape[0] * scale)
-            resized = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
-            is_success, buffer = cv2.imencode(".jpg", resized, encode_param)
-
-        memory_file = io.BytesIO(buffer.tobytes())
-        memory_file.seek(0)
-
-        return StreamingResponse(
-            memory_file, 
-            media_type='image/jpeg',
-            headers={'Content-Disposition': f'attachment; filename="compressed_{file.filename.rsplit(".", 1)[0]}.jpg"'}
-        )
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-if __name__ == '__main__':
-    import uvicorn
-    uvicorn.run(app, host='0.0.0.0', port=5000)
+            if os
